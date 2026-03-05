@@ -1,0 +1,5 @@
+aiogram
+apscheduler
+python-dotenv
+pytz
+sqlalchemy
