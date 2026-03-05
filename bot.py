@@ -48,8 +48,12 @@ db = Database(timezone=TIMEZONE)
 message_queue = None
 tz = pytz.timezone(TIMEZONE)
 
+# Функция для получения правильного минского времени
 def get_minsk_time():
-    return datetime.now(tz)
+    """Возвращает текущее время в Минске с учетом всех настроек"""
+    utc_now = datetime.now(pytz.UTC)
+    minsk_now = utc_now.astimezone(pytz.timezone('Europe/Minsk'))
+    return minsk_now
 
 # Состояния FSM
 class TaskStates(StatesGroup):
@@ -87,7 +91,7 @@ def get_priority_keyboard():
 
 def get_category_keyboard(categories):
     buttons = []
-    for cat in categories[:8]:  # Показываем первые 8 категорий
+    for cat in categories[:8]:
         buttons.append([InlineKeyboardButton(text=f"📁 {cat}", callback_data=f"category:{cat}")])
     buttons.append([InlineKeyboardButton(text="➕ Новая категория", callback_data="category:new")])
     buttons.append([InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_start")])
@@ -120,7 +124,8 @@ def get_edit_options_keyboard(task_id):
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 def get_calendar_keyboard():
-    now = get_minsk_time()
+    """Клавиатура с правильным минским временем"""
+    now = get_minsk_time()  # Используем функцию с правильным временем
     buttons = [
         [InlineKeyboardButton(text=f"📅 Сегодня ({now.strftime('%d.%m.%Y')})", callback_data="date:today")],
         [InlineKeyboardButton(text=f"📅 Завтра ({(now+timedelta(days=1)).strftime('%d.%m.%Y')})", callback_data="date:tomorrow")],
@@ -135,6 +140,11 @@ def get_calendar_keyboard():
 @dp.message(CommandStart())
 async def cmd_start(message: types.Message):
     user = message.from_user
+    
+    # Диагностика времени
+    minsk_now = get_minsk_time()
+    logger.info(f"Пользователь {user.id} запустил бота. Минское время: {minsk_now}")
+    
     db.add_user(user.id, user.username, user.first_name, user.last_name)
     
     await message.answer(
@@ -144,12 +154,14 @@ async def cmd_start(message: types.Message):
         f"• ⚡ **Приоритеты** (Высокий, Средний, Низкий)\n"
         f"• ✏️ **Редактирование** задач\n"
         f"• 🔍 **Фильтрация** по категориям\n\n"
-        f"📍 Часовой пояс: {TIMEZONE}",
+        f"📍 Часовой пояс: {TIMEZONE}\n"
+        f"🕐 Текущее время: {minsk_now.strftime('%d.%m.%Y %H:%M')}",
         reply_markup=get_main_keyboard()
     )
 
 @dp.message(F.text == "➕ Новая задача")
 async def cmd_new_task(message: types.Message, state: FSMContext):
+    logger.info(f"Пользователь {message.from_user.id} начал создание задачи")
     await state.set_state(TaskStates.waiting_for_task_text)
     await message.answer(
         "📝 Введите текст задачи:",
@@ -158,7 +170,12 @@ async def cmd_new_task(message: types.Message, state: FSMContext):
 
 @dp.message(TaskStates.waiting_for_task_text)
 async def process_task_text(message: types.Message, state: FSMContext):
-    await state.update_data(task_text=message.text)
+    task_text = message.text.strip()
+    if len(task_text) < 3:
+        await message.answer("❌ Слишком короткий текст. Попробуйте снова:")
+        return
+    
+    await state.update_data(task_text=task_text)
     categories = db.get_user_categories(message.from_user.id)
     await state.set_state(TaskStates.waiting_for_category)
     await message.answer(
@@ -208,67 +225,110 @@ async def process_priority(callback: types.CallbackQuery, state: FSMContext):
 @dp.callback_query(TaskStates.waiting_for_deadline, F.data.startswith("date:"))
 async def process_deadline_date(callback: types.CallbackQuery, state: FSMContext):
     date_choice = callback.data.split(":")[1]
-    now = get_minsk_time()
+    now = get_minsk_time()  # Правильное минское время
     
     if date_choice == "today":
         selected_date = now.strftime("%Y-%m-%d")
+        display_date = now.strftime("%d.%m.%Y")
+        await state.update_data(selected_date=selected_date)
+        await callback.message.answer(
+            f"✅ Выбрана дата: {display_date}\n"
+            f"🕐 Теперь введите время (ЧЧ:ММ):"
+        )
     elif date_choice == "tomorrow":
-        selected_date = (now + timedelta(days=1)).strftime("%Y-%m-%d")
+        tomorrow = now + timedelta(days=1)
+        selected_date = tomorrow.strftime("%Y-%m-%d")
+        display_date = tomorrow.strftime("%d.%m.%Y")
+        await state.update_data(selected_date=selected_date)
+        await callback.message.answer(
+            f"✅ Выбрана дата: {display_date}\n"
+            f"🕐 Теперь введите время (ЧЧ:ММ):"
+        )
     elif date_choice == "after_tomorrow":
-        selected_date = (now + timedelta(days=2)).strftime("%Y-%m-%d")
+        after_tomorrow = now + timedelta(days=2)
+        selected_date = after_tomorrow.strftime("%Y-%m-%d")
+        display_date = after_tomorrow.strftime("%d.%m.%Y")
+        await state.update_data(selected_date=selected_date)
+        await callback.message.answer(
+            f"✅ Выбрана дата: {display_date}\n"
+            f"🕐 Теперь введите время (ЧЧ:ММ):"
+        )
     elif date_choice == "next_week":
-        selected_date = (now + timedelta(days=7)).strftime("%Y-%m-%d")
+        next_week = now + timedelta(days=7)
+        selected_date = next_week.strftime("%Y-%m-%d")
+        display_date = next_week.strftime("%d.%m.%Y")
+        await state.update_data(selected_date=selected_date)
+        await callback.message.answer(
+            f"✅ Выбрана дата: {display_date}\n"
+            f"🕐 Теперь введите время (ЧЧ:ММ):"
+        )
     elif date_choice == "custom":
         await callback.message.answer("Введите дату в формате ДД.ММ.ГГГГ:")
-        await callback.answer()
-        return
     
-    await state.update_data(selected_date=selected_date)
-    await callback.message.answer("🕐 Введите время (ЧЧ:ММ):")
     await callback.answer()
 
 @dp.message(TaskStates.waiting_for_deadline)
-async def process_deadline_time(message: types.Message, state: FSMContext):
-    try:
-        data = await state.get_data()
-        time_str = message.text.strip()
-        
-        if 'selected_date' not in data:
-            # Ввод даты вручную
-            date_obj = datetime.strptime(time_str, "%d.%m.%Y")
+async def process_deadline_input(message: types.Message, state: FSMContext):
+    data = await state.get_data()
+    
+    # Если даты еще нет - значит пользователь вводит дату вручную
+    if 'selected_date' not in data:
+        try:
+            date_str = message.text.strip()
+            date_obj = datetime.strptime(date_str, "%d.%m.%Y")
             selected_date = date_obj.strftime("%Y-%m-%d")
             await state.update_data(selected_date=selected_date)
             await message.answer("🕐 Введите время (ЧЧ:ММ):")
-            return
-        
-        # Ввод времени
-        time_obj = datetime.strptime(time_str, "%H:%M").time()
-        date_part = datetime.strptime(data['selected_date'], "%Y-%m-%d").date()
-        deadline_local = tz.localize(datetime.combine(date_part, time_obj))
-        
-        if deadline_local <= get_minsk_time():
-            await message.answer("❌ Дедлайн должен быть в будущем!")
-            return
-        
-        task_id = db.add_task(
-            user_id=message.from_user.id,
-            task_text=data['task_text'],
-            deadline_input=deadline_local,
-            category=data.get('category', 'Без категории'),
-            priority=data.get('priority', 'Средний')
-        )
-        
-        await state.clear()
-        await message.answer(
-            f"✅ **Задача создана!**\n\n"
-            f"📌 {data['task_text']}\n"
-            f"📁 {data.get('category', 'Без категории')} | {data.get('priority', 'Средний')}\n"
-            f"📅 {deadline_local.strftime('%d.%m.%Y %H:%M')}",
-            reply_markup=get_main_keyboard()
-        )
-        
-    except ValueError:
-        await message.answer("❌ Неверный формат. Попробуйте снова:")
+        except ValueError:
+            await message.answer("❌ Неверный формат даты. Используйте ДД.ММ.ГГГГ")
+    
+    # Если дата уже есть - значит пользователь вводит время
+    else:
+        try:
+            time_str = message.text.strip()
+            time_obj = datetime.strptime(time_str, "%H:%M").time()
+            
+            date_part = datetime.strptime(data['selected_date'], "%Y-%m-%d").date()
+            deadline_naive = datetime.combine(date_part, time_obj)
+            
+            # Добавляем часовой пояс Минска
+            deadline_local = tz.localize(deadline_naive)
+            
+            # Текущее время в Минске
+            now = get_minsk_time()
+            
+            # Проверяем, что дедлайн в будущем
+            if deadline_local <= now:
+                await message.answer(
+                    f"❌ Дедлайн должен быть в будущем!\n"
+                    f"Сейчас: {now.strftime('%d.%m.%Y %H:%M')}\n"
+                    f"Попробуйте снова:"
+                )
+                return
+            
+            # Создаем задачу
+            task_id = db.add_task(
+                user_id=message.from_user.id,
+                task_text=data['task_text'],
+                deadline_input=deadline_local,
+                category=data.get('category', 'Без категории'),
+                priority=data.get('priority', 'Средний')
+            )
+            
+            await state.clear()
+            
+            await message.answer(
+                f"✅ **Задача создана!**\n\n"
+                f"📌 **{data['task_text']}**\n"
+                f"📁 Категория: {data.get('category', 'Без категории')}\n"
+                f"⚡ Приоритет: {data.get('priority', 'Средний')}\n"
+                f"📅 Дедлайн: {deadline_local.strftime('%d.%m.%Y %H:%M')}\n"
+                f"🆔 ID: {task_id}",
+                reply_markup=get_main_keyboard()
+            )
+            
+        except ValueError:
+            await message.answer("❌ Неверный формат времени. Используйте ЧЧ:ММ")
 
 @dp.message(F.text == "📋 Мои задачи")
 async def cmd_tasks(message: types.Message):
@@ -296,7 +356,7 @@ async def process_filter(callback: types.CallbackQuery):
         deadline = task['deadline_obj'].strftime('%d.%m.%Y %H:%M')
         text += f"{priority_emoji} **{task['task_text'][:30]}**\n"
         text += f"   📅 {deadline} | 🏷️ {task['category']}\n"
-        text += f"   [Подробнее](command:view_{task['id']})\n\n"
+        text += f"   [Подробнее](tg://user?id={task['id']})\n\n"
     
     await callback.message.edit_text(text)
     await callback.answer()
@@ -363,18 +423,75 @@ async def edit_task_deadline(callback: types.CallbackQuery, state: FSMContext):
 async def process_edit_deadline(message: types.Message, state: FSMContext):
     try:
         data = await state.get_data()
-        deadline_local = tz.localize(datetime.strptime(message.text, "%d.%m.%Y %H:%M"))
+        deadline_naive = datetime.strptime(message.text, "%d.%m.%Y %H:%M")
+        deadline_local = tz.localize(deadline_naive)
+        
+        now = get_minsk_time()
+        if deadline_local <= now:
+            await message.answer(
+                f"❌ Дедлайн должен быть в будущем!\n"
+                f"Сейчас: {now.strftime('%d.%m.%Y %H:%M')}"
+            )
+            return
+        
         db.update_task(data['edit_task_id'], deadline=deadline_local)
         await state.clear()
         await message.answer("✅ Дедлайн обновлен!", reply_markup=get_main_keyboard())
     except ValueError:
         await message.answer("❌ Неверный формат. Используйте ДД.ММ.ГГГГ ЧЧ:ММ")
 
+@dp.callback_query(F.data.startswith("edit_category:"))
+async def edit_task_category(callback: types.CallbackQuery, state: FSMContext):
+    task_id = int(callback.data.split(":")[1])
+    await state.update_data(edit_task_id=task_id)
+    categories = db.get_user_categories(callback.from_user.id)
+    await state.set_state(TaskStates.waiting_for_edit_category)
+    await callback.message.answer(
+        "Выберите новую категорию:",
+        reply_markup=get_category_keyboard(categories)
+    )
+    await callback.answer()
+
+@dp.callback_query(TaskStates.waiting_for_edit_category, F.data.startswith("category:"))
+async def process_edit_category(callback: types.CallbackQuery, state: FSMContext):
+    category = callback.data.split(":")[1]
+    data = await state.get_data()
+    
+    if category == "new":
+        await callback.message.answer("Введите название новой категории:")
+        await state.set_state(TaskStates.waiting_for_new_category)
+    else:
+        db.update_task(data['edit_task_id'], category=category)
+        await state.clear()
+        await callback.message.answer("✅ Категория обновлена!", reply_markup=get_main_keyboard())
+    await callback.answer()
+
+@dp.callback_query(F.data.startswith("edit_priority:"))
+async def edit_task_priority(callback: types.CallbackQuery, state: FSMContext):
+    task_id = int(callback.data.split(":")[1])
+    await state.update_data(edit_task_id=task_id)
+    await state.set_state(TaskStates.waiting_for_edit_priority)
+    await callback.message.answer(
+        "Выберите новый приоритет:",
+        reply_markup=get_priority_keyboard()
+    )
+    await callback.answer()
+
+@dp.callback_query(TaskStates.waiting_for_edit_priority, F.data.startswith("priority:"))
+async def process_edit_priority(callback: types.CallbackQuery, state: FSMContext):
+    priority_map = {"high": "Высокий", "medium": "Средний", "low": "Низкий"}
+    priority = priority_map[callback.data.split(":")[1]]
+    data = await state.get_data()
+    db.update_task(data['edit_task_id'], priority=priority)
+    await state.clear()
+    await callback.message.answer("✅ Приоритет обновлен!", reply_markup=get_main_keyboard())
+    await callback.answer()
+
 @dp.callback_query(F.data.startswith("complete:"))
 async def complete_task(callback: types.CallbackQuery):
     task_id = int(callback.data.split(":")[1])
     db.complete_task(task_id)
-    await callback.message.edit_text("✅ Задача выполнена!")
+    await callback.message.edit_text("✅ Задача выполнена! Отличная работа! 🎉")
     await callback.answer()
 
 @dp.callback_query(F.data.startswith("delete:"))
@@ -402,7 +519,8 @@ async def cmd_categories(message: types.Message):
     categories = db.get_user_categories(message.from_user.id)
     text = "📁 **Ваши категории:**\n\n"
     for cat in categories:
-        text += f"• {cat}\n"
+        count = len(db.get_user_tasks(message.from_user.id, category=cat))
+        text += f"• {cat} ({count} задач)\n"
     text += "\nЧтобы добавить категорию, создайте новую задачу."
     await message.answer(text)
 
@@ -424,6 +542,7 @@ async def cmd_completed(message: types.Message):
 @dp.message(F.text == "ℹ️ Помощь")
 @dp.message(Command("help"))
 async def cmd_help(message: types.Message):
+    now = get_minsk_time()
     help_text = (
         "📚 **Справка по командам:**\n\n"
         "**Основные функции:**\n"
@@ -436,9 +555,28 @@ async def cmd_help(message: types.Message):
         "• ✏️ Редактировать текст, дату, категорию, приоритет\n"
         "• ✅ Отметить выполненной\n"
         "• 🗑 Удалить\n\n"
-        f"📍 Часовой пояс: {TIMEZONE}"
+        f"📍 **Часовой пояс:** {TIMEZONE}\n"
+        f"🕐 **Текущее время:** {now.strftime('%d.%m.%Y %H:%M')}"
     )
-    await message.answer(help_text)
+    await message.answer(help_text, reply_markup=get_main_keyboard())
+
+@dp.message(F.text == "❌ Удалить задачу")
+async def cmd_delete_prompt(message: types.Message):
+    tasks = db.get_user_tasks(message.from_user.id, status='active')
+    
+    if not tasks:
+        await message.answer("📭 Нет активных задач для удаления.")
+        return
+    
+    buttons = []
+    for task in tasks[:5]:
+        buttons.append([InlineKeyboardButton(
+            text=f"🗑 {task['task_text'][:30]}...",
+            callback_data=f"delete:{task['id']}"
+        )])
+    
+    keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
+    await message.answer("Выберите задачу для удаления:", reply_markup=keyboard)
 
 @dp.message()
 async def handle_unknown(message: types.Message):
@@ -447,18 +585,14 @@ async def handle_unknown(message: types.Message):
         reply_markup=get_main_keyboard()
     )
 
-async def main():
-    logger.info("🚀 Запуск бота...")
-    global message_queue
-    message_queue = asyncio.Queue()
-    asyncio.create_task(message_sender_worker(message_queue))
-    
-    scheduler = ReminderScheduler(db, bot, TIMEZONE, message_queue)
-    scheduler.start()
-    
-    await dp.start_polling(bot)
+# Обработчик ошибок
+@dp.error()
+async def error_handler(event: types.ErrorEvent):
+    logger.error(f"❌ Ошибка: {event.exception}")
+    logger.error(traceback.format_exc())
 
 async def message_sender_worker(queue):
+    """Воркер для отправки сообщений из очереди"""
     while True:
         try:
             chat_id, text = await queue.get()
@@ -467,6 +601,22 @@ async def message_sender_worker(queue):
             logger.error(f"Ошибка отправки: {e}")
         finally:
             queue.task_done()
+
+async def main():
+    logger.info("🚀 Запуск бота...")
+    
+    # Диагностика времени при запуске
+    minsk_now = get_minsk_time()
+    logger.info(f"Минское время при запуске: {minsk_now}")
+    
+    global message_queue
+    message_queue = asyncio.Queue()
+    asyncio.create_task(message_sender_worker(message_queue))
+    
+    scheduler = ReminderScheduler(db, bot, TIMEZONE, message_queue)
+    scheduler.start()
+    
+    await dp.start_polling(bot)
 
 if __name__ == "__main__":
     asyncio.run(main())
