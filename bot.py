@@ -21,8 +21,7 @@ from scheduler import ReminderScheduler
 
 # Загрузка переменных окружения
 load_dotenv()
-BOT_TOKEN = os.getenv ("8611044273:AAF1tyMcIwP5df6hptF3bpxHN2XADUoi-Zw")
-
+BOT_TOKEN = os.getenv("BOT_TOKEN")
 TIMEZONE = os.getenv("TIMEZONE", "Europe/Minsk")  # По умолчанию Минск
 
 # Проверка наличия токена
@@ -91,7 +90,7 @@ def get_tasks_keyboard(tasks: list, action: str = "complete"):
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 def get_calendar_keyboard():
-    """Клавиатура для быстрого выбора даты"""
+    """Клавиатура для быстрого выбора даты с правильным часовым поясом"""
     now = datetime.now(tz)
     dates = []
     
@@ -198,6 +197,10 @@ async def cmd_start(message: types.Message):
             last_name=user.last_name
         )
         
+        # Отладочная информация о времени
+        now = datetime.now(tz)
+        logger.info(f"Текущее время на сервере (Минск): {now.strftime('%d.%m.%Y %H:%M:%S')}")
+        
         welcome_text = (
             f"👋 **Привет, {user.first_name}!**\n\n"
             f"Я бот для планирования задач. Я помогу тебе:\n"
@@ -208,7 +211,8 @@ async def cmd_start(message: types.Message):
             f"`/tasks` - все задачи\n"
             f"`/add` - новая задача\n"
             f"`/help` - помощь\n\n"
-            f"📍 Часовой пояс: {TIMEZONE}"
+            f"📍 Часовой пояс: {TIMEZONE}\n"
+            f"🕐 Текущее время: {now.strftime('%d.%m.%Y %H:%M')}"
         )
         
         await message.answer(welcome_text, reply_markup=get_main_keyboard())
@@ -257,39 +261,52 @@ async def process_deadline_date(callback: types.CallbackQuery, state: FSMContext
     await callback.message.delete()
     
     date_choice = callback.data.split(":")[1]
+    
+    # Используем минское время для всех расчетов
     now = datetime.now(tz)
     
+    # Получаем дату в зависимости от выбора
     if date_choice == "today":
+        # Сегодняшняя дата в минском времени
         selected_date = now.strftime("%Y-%m-%d")
-        await state.update_data(selected_date=selected_date)
-        await callback.message.answer(
-            f"🕐 Теперь введите время дедлайна (в формате ЧЧ:ММ, например 18:00):"
-        )
+        display_date = now.strftime("%d.%m.%Y")
+        
     elif date_choice == "tomorrow":
-        selected_date = (now + timedelta(days=1)).strftime("%Y-%m-%d")
-        await state.update_data(selected_date=selected_date)
-        await callback.message.answer(
-            f"🕐 Теперь введите время дедлайна (в формате ЧЧ:ММ, например 18:00):"
-        )
+        # Завтрашняя дата
+        tomorrow = now + timedelta(days=1)
+        selected_date = tomorrow.strftime("%Y-%m-%d")
+        display_date = tomorrow.strftime("%d.%m.%Y")
+        
     elif date_choice == "after_tomorrow":
-        selected_date = (now + timedelta(days=2)).strftime("%Y-%m-%d")
-        await state.update_data(selected_date=selected_date)
-        await callback.message.answer(
-            f"🕐 Теперь введите время дедлайна (в формате ЧЧ:ММ, например 18:00):"
-        )
+        # Послезавтра
+        after_tomorrow = now + timedelta(days=2)
+        selected_date = after_tomorrow.strftime("%Y-%m-%d")
+        display_date = after_tomorrow.strftime("%d.%m.%Y")
+        
     elif date_choice == "next_week":
-        selected_date = (now + timedelta(days=7)).strftime("%Y-%m-%d")
-        await state.update_data(selected_date=selected_date)
-        await callback.message.answer(
-            f"🕐 Теперь введите время дедлайна (в формате ЧЧ:ММ, например 18:00):"
-        )
+        # Через неделю
+        next_week = now + timedelta(days=7)
+        selected_date = next_week.strftime("%Y-%m-%d")
+        display_date = next_week.strftime("%d.%m.%Y")
+        
     elif date_choice == "custom":
         await callback.message.answer(
             "Введите дату в формате ДД.ММ.ГГГГ (например, 25.12.2024):"
         )
+        await callback.answer()
+        return
     
+    # Сохраняем выбранную дату
+    await state.update_data(selected_date=selected_date)
+    
+    # Подтверждаем пользователю
+    await callback.message.answer(
+        f"✅ Выбрана дата: {display_date}\n"
+        f"🕐 Теперь введите время дедлайна (в формате ЧЧ:ММ, например 18:00):"
+    )
+    
+    logger.info(f"Пользователь {callback.from_user.id} выбрал дату: {display_date}")
     await callback.answer()
-    logger.info(f"Пользователь {callback.from_user.id} выбрал дату: {date_choice}")
 
 @dp.message(TaskStates.waiting_for_deadline)
 async def process_deadline_input(message: types.Message, state: FSMContext):
@@ -332,13 +349,23 @@ async def process_deadline_input(message: types.Message, state: FSMContext):
             
             # Создаем datetime объект в локальном часовом поясе
             date_part = datetime.strptime(selected_date, "%Y-%m-%d").date()
-            deadline_local = datetime.combine(date_part, time_obj)
+            deadline_naive = datetime.combine(date_part, time_obj)
             
-            # Добавляем часовой пояс
-            deadline_local = tz.localize(deadline_local)
+            # Добавляем часовой пояс Минска
+            deadline_local = tz.localize(deadline_naive)
+            
+            # Текущее время в Минске
+            now = datetime.now(tz)
+            
+            # Отладка
+            logger.info(f"Создание задачи пользователем {message.from_user.id}:")
+            logger.info(f"  Выбранная дата: {selected_date}")
+            logger.info(f"  Время: {time_str}")
+            logger.info(f"  Локальный дедлайн: {deadline_local}")
+            logger.info(f"  Текущее время (Минск): {now}")
+            logger.info(f"  Разница: {deadline_local - now}")
             
             # Проверяем, что дедлайн в будущем
-            now = datetime.now(tz)
             if deadline_local <= now:
                 await message.answer("❌ Дедлайн должен быть в будущем! Попробуйте снова:")
                 return
@@ -391,8 +418,13 @@ async def cmd_tasks(message: types.Message):
     
     response = "📋 **Активные задачи:**\n\n"
     for task in tasks:
-        # Используем отформатированную дату из базы данных
-        deadline_display = task.get('deadline_display', 'Неизвестно')
+        # Правильное форматирование даты
+        if 'deadline_obj' in task:
+            deadline_display = task['deadline_obj'].strftime('%d.%m.%Y %H:%M')
+        elif 'deadline_display' in task:
+            deadline_display = task['deadline_display']
+        else:
+            deadline_display = 'Неизвестно'
         
         # Добавляем информацию о статусе напоминаний
         reminders = []
@@ -435,7 +467,13 @@ async def cmd_completed(message: types.Message):
     
     response = "✅ **Выполненные задачи:**\n\n"
     for task in tasks:
-        deadline_display = task.get('deadline_display', 'Неизвестно')
+        if 'deadline_obj' in task:
+            deadline_display = task['deadline_obj'].strftime('%d.%m.%Y %H:%M')
+        elif 'deadline_display' in task:
+            deadline_display = task['deadline_display']
+        else:
+            deadline_display = 'Неизвестно'
+            
         response += f"✓ {task['task_text']}\n"
         response += f"   🆔 ID: `{task['id']}` | 📅 {deadline_display}\n\n"
     
@@ -557,6 +595,7 @@ async def process_back(callback: types.CallbackQuery, state: FSMContext):
 @dp.message(Command("help"))
 async def cmd_help(message: types.Message):
     """Справка по командам"""
+    now = datetime.now(tz)
     help_text = (
         "📚 **Справка по командам:**\n\n"
         "**Основные команды:**\n"
@@ -581,7 +620,8 @@ async def cmd_help(message: types.Message):
         "• `Сдать отчет`\n"
         "• Дата: `25.12.2024`\n"
         "• Время: `18:00`\n\n"
-        f"📍 **Часовой пояс:** {TIMEZONE}"
+        f"📍 **Часовой пояс:** {TIMEZONE}\n"
+        f"🕐 **Текущее время:** {now.strftime('%d.%m.%Y %H:%M')}"
     )
     await message.answer(help_text, reply_markup=get_main_keyboard())
 
@@ -614,6 +654,10 @@ async def main():
     logger.info("🚀 ===== ЗАПУСК БОТА =====")
     logger.info(f"Токен: {BOT_TOKEN[:10]}... (скрыт)")
     logger.info(f"Часовой пояс: {TIMEZONE}")
+    
+    # Показываем текущее время на сервере
+    now = datetime.now(tz)
+    logger.info(f"Текущее время на сервере: {now.strftime('%d.%m.%Y %H:%M:%S')}")
     
     global message_queue
     
