@@ -21,7 +21,7 @@ from scheduler import ReminderScheduler
 
 # Загрузка переменных окружения
 load_dotenv()
-BOT_TOKEN = os.getenv("BOT_TOKEN")
+BOT_TOKEN = os.getenv(8611044273:AAF1tyMcIwP5df6hptF3bpxHN2XADUoi-Zw)
 TIMEZONE = os.getenv("TIMEZONE", "Europe/Minsk")  # По умолчанию Минск
 
 # Проверка наличия токена
