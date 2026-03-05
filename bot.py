@@ -22,7 +22,7 @@ from scheduler import ReminderScheduler
 # Загрузка переменных окружения
 load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-TIMEZONE = os.getenv("TIMEZONE", "Europe/Moscow")
+TIMEZONE = os.getenv("TIMEZONE", "Europe/Minsk")  # По умолчанию Минск
 
 # Проверка наличия токена
 if not BOT_TOKEN:
@@ -46,10 +46,13 @@ logger = logging.getLogger(__name__)
 bot = Bot(token=BOT_TOKEN)
 storage = MemoryStorage()
 dp = Dispatcher(storage=storage)
-db = Database()
+db = Database(timezone=TIMEZONE)  # Передаём часовой пояс в базу данных
 
 # Глобальная очередь для сообщений (будет создана в main)
 message_queue = None
+
+# Часовой пояс для использования в функциях
+tz = pytz.timezone(TIMEZONE)
 
 # Состояния для FSM
 class TaskStates(StatesGroup):
@@ -88,7 +91,7 @@ def get_tasks_keyboard(tasks: list, action: str = "complete"):
 
 def get_calendar_keyboard():
     """Клавиатура для быстрого выбора даты"""
-    now = datetime.now()
+    now = datetime.now(tz)
     dates = []
     
     # Сегодня
@@ -114,9 +117,8 @@ def get_calendar_keyboard():
     return InlineKeyboardMarkup(inline_keyboard=dates)
 
 # Воркер для очереди сообщений
-
 async def message_sender_worker(queue):
-    """Улучшенный воркер для отправки сообщений из очереди"""
+    """Воркер для отправки сообщений из очереди"""
     logger.info("="*60)
     logger.info("🚀 ЗАПУСК ВОРКЕРА ОЧЕРЕДИ")
     logger.info("="*60)
@@ -152,9 +154,16 @@ async def message_sender_worker(queue):
                 logger.error(traceback.format_exc())
                 
                 # Возвращаем в очередь для повторной попытки (до 3 раз)
-                if getattr(message, 'retry_count', 0) < 3:
-                    message.retry_count = getattr(message, 'retry_count', 0) + 1
-                    logger.info(f"   ↩️ Повторная попытка #{message.retry_count} через 5 сек")
+                if not hasattr(message_sender_worker, 'retry_count'):
+                    message_sender_worker.retry_count = {}
+                
+                key = f"{chat_id}_{text[:50]}"
+                if key not in message_sender_worker.retry_count:
+                    message_sender_worker.retry_count[key] = 0
+                
+                if message_sender_worker.retry_count[key] < 3:
+                    message_sender_worker.retry_count[key] += 1
+                    logger.info(f"   ↩️ Повторная попытка #{message_sender_worker.retry_count[key]} через 5 сек")
                     await asyncio.sleep(5)
                     await queue.put((chat_id, text))
                 else:
@@ -172,11 +181,6 @@ async def message_sender_worker(queue):
             logger.error(f"❌ КРИТИЧЕСКАЯ ОШИБКА ВОРКЕРА: {e}")
             logger.error(traceback.format_exc())
             await asyncio.sleep(1)
-
-async def put_message_with_delay(queue, chat_id, text, delay):
-    """Отправка сообщения в очередь с задержкой"""
-    await asyncio.sleep(delay)
-    await queue.put((chat_id, text))
 
 # Обработчики команд
 @dp.message(CommandStart())
@@ -202,7 +206,8 @@ async def cmd_start(message: types.Message):
             f"Используй кнопки ниже или команды:\n"
             f"`/tasks` - все задачи\n"
             f"`/add` - новая задача\n"
-            f"`/help` - помощь"
+            f"`/help` - помощь\n\n"
+            f"📍 Часовой пояс: {TIMEZONE}"
         )
         
         await message.answer(welcome_text, reply_markup=get_main_keyboard())
@@ -251,7 +256,7 @@ async def process_deadline_date(callback: types.CallbackQuery, state: FSMContext
     await callback.message.delete()
     
     date_choice = callback.data.split(":")[1]
-    now = datetime.now()
+    now = datetime.now(tz)
     
     if date_choice == "today":
         selected_date = now.strftime("%Y-%m-%d")
@@ -324,12 +329,16 @@ async def process_deadline_input(message: types.Message, state: FSMContext):
             task_text = data.get('task_text')
             selected_date = data.get('selected_date')
             
-            # Формирование полной даты и времени
-            deadline_str = f"{selected_date} {time_str}:00"
+            # Создаем datetime объект в локальном часовом поясе
+            date_part = datetime.strptime(selected_date, "%Y-%m-%d").date()
+            deadline_local = datetime.combine(date_part, time_obj)
+            
+            # Добавляем часовой пояс
+            deadline_local = tz.localize(deadline_local)
             
             # Проверяем, что дедлайн в будущем
-            deadline_dt = datetime.strptime(deadline_str, "%Y-%m-%d %H:%M:%S")
-            if deadline_dt <= datetime.now():
+            now = datetime.now(tz)
+            if deadline_local <= now:
                 await message.answer("❌ Дедлайн должен быть в будущем! Попробуйте снова:")
                 return
             
@@ -337,19 +346,19 @@ async def process_deadline_input(message: types.Message, state: FSMContext):
             task_id = db.add_task(
                 user_id=message.from_user.id,
                 task_text=task_text,
-                deadline=deadline_str
+                deadline_input=deadline_local
             )
             
             # Очищаем состояние
             await state.clear()
             
             # Форматирование для красивого вывода
-            deadline_formatted = deadline_dt.strftime("%d.%m.%Y %H:%M")
+            deadline_formatted = deadline_local.strftime("%d.%m.%Y %H:%M")
             
             await message.answer(
                 f"✅ **Задача успешно создана!**\n\n"
                 f"📌 **Задача:** {task_text}\n"
-                f"📅 **Дедлайн:** {deadline_formatted}\n"
+                f"📅 **Дедлайн:** {deadline_formatted} (минское время)\n"
                 f"🆔 **ID:** {task_id}\n\n"
                 f"Я напомню о задаче за 3 дня, 24 часа, 1 час и 5 минут до дедлайна.",
                 reply_markup=get_main_keyboard()
@@ -381,24 +390,24 @@ async def cmd_tasks(message: types.Message):
     
     response = "📋 **Активные задачи:**\n\n"
     for task in tasks:
-        deadline = datetime.strptime(task['deadline'], "%Y-%m-%d %H:%M:%S")
-        deadline_formatted = deadline.strftime("%d.%m.%Y %H:%M")
+        # Используем отформатированную дату из базы данных
+        deadline_display = task.get('deadline_display', 'Неизвестно')
         
         # Добавляем информацию о статусе напоминаний
         reminders = []
-        if task['reminder_3d']:
+        if task.get('reminder_3d'):
             reminders.append("📅 3д")
-        if task['reminder_24h']:
+        if task.get('reminder_24h'):
             reminders.append("⏰ 24ч")
-        if task['reminder_1h']:
+        if task.get('reminder_1h'):
             reminders.append("⏱ 1ч")
-        if task['reminder_5m']:
+        if task.get('reminder_5m'):
             reminders.append("⏲ 5м")
         
         reminder_status = f" [🔔 {', '.join(reminders)}]" if reminders else " [⏳ ожидает]"
         
         response += f"🔹 **{task['task_text']}**\n"
-        response += f"   🆔 ID: `{task['id']}` | 📅 {deadline_formatted}{reminder_status}\n\n"
+        response += f"   🆔 ID: `{task['id']}` | 📅 {deadline_display}{reminder_status}\n\n"
     
     # Кнопка для отметки выполнения
     keyboard = InlineKeyboardMarkup(
@@ -425,10 +434,9 @@ async def cmd_completed(message: types.Message):
     
     response = "✅ **Выполненные задачи:**\n\n"
     for task in tasks:
-        deadline = datetime.strptime(task['deadline'], "%Y-%m-%d %H:%M:%S")
-        deadline_formatted = deadline.strftime("%d.%m.%Y %H:%M")
+        deadline_display = task.get('deadline_display', 'Неизвестно')
         response += f"✓ {task['task_text']}\n"
-        response += f"   🆔 ID: `{task['id']}` | 📅 {deadline_formatted}\n\n"
+        response += f"   🆔 ID: `{task['id']}` | 📅 {deadline_display}\n\n"
     
     # Кнопка для удаления
     keyboard = InlineKeyboardMarkup(
@@ -571,7 +579,8 @@ async def cmd_help(message: types.Message):
         "• `Купить продукты`\n"
         "• `Сдать отчет`\n"
         "• Дата: `25.12.2024`\n"
-        "• Время: `18:00`"
+        "• Время: `18:00`\n\n"
+        f"📍 **Часовой пояс:** {TIMEZONE}"
     )
     await message.answer(help_text, reply_markup=get_main_keyboard())
 
