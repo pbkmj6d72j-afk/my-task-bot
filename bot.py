@@ -57,20 +57,26 @@ def get_minsk_time():
 
 # Состояния FSM
 class TaskStates(StatesGroup):
+    # Основные состояния для создания задачи
     waiting_for_task_text = State()
     waiting_for_category = State()
     waiting_for_new_category = State()
-    waiting_for_priority = State()
-    waiting_for_deadline = State()
     waiting_for_tags = State()
+    waiting_for_new_tag = State()  # ← ВАЖНО: для создания нового тега
+    waiting_for_priority = State()
     waiting_for_recurring = State()
     waiting_for_recurring_interval = State()
+    waiting_for_deadline = State()
+    
+    # Состояния для редактирования
     waiting_for_edit_task_id = State()
     waiting_for_edit_text = State()
     waiting_for_edit_deadline = State()
     waiting_for_edit_category = State()
     waiting_for_edit_priority = State()
     waiting_for_edit_tags = State()
+    
+    # Состояние для откладывания
     waiting_for_snooze = State()
 
 # Клавиатуры
