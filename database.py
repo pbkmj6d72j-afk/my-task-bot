@@ -10,20 +10,33 @@ class Database:
         self.init_db()
     
     def init_db(self):
-        """Создание таблиц при первом запуске"""
+        """Создание таблиц с новыми полями"""
         with sqlite3.connect(self.db_path) as conn:
+            # Таблица задач с новыми полями
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS tasks (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     user_id INTEGER NOT NULL,
                     task_text TEXT NOT NULL,
                     deadline TIMESTAMP NOT NULL,
+                    category TEXT DEFAULT 'Без категории',
+                    priority TEXT DEFAULT 'Средний',
                     status TEXT DEFAULT 'active',
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     reminder_3d BOOLEAN DEFAULT 0,
                     reminder_24h BOOLEAN DEFAULT 0,
                     reminder_1h BOOLEAN DEFAULT 0,
                     reminder_5m BOOLEAN DEFAULT 0
+                )
+            """)
+            
+            # Таблица категорий для каждого пользователя
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS categories (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER NOT NULL,
+                    category_name TEXT NOT NULL,
+                    UNIQUE(user_id, category_name)
                 )
             """)
             
@@ -37,37 +50,6 @@ class Database:
                 )
             """)
     
-    def _format_deadline_for_db(self, dt: datetime) -> str:
-        """
-        Преобразует datetime в строку для сохранения в БД
-        Всегда сохраняет в UTC, чтобы избежать проблем с часовыми поясами
-        """
-        if dt.tzinfo is not None:
-            # Если время с часовым поясом, конвертируем в UTC
-            dt_utc = dt.astimezone(pytz.UTC)
-        else:
-            # Если время без пояса, считаем что оно в локальном поясе и конвертируем
-            local_dt = self.timezone.localize(dt)
-            dt_utc = local_dt.astimezone(pytz.UTC)
-        
-        # Возвращаем строку в формате ISO
-        return dt_utc.strftime('%Y-%m-%d %H:%M:%S')
-    
-    def _parse_deadline_from_db(self, deadline_str: str) -> datetime:
-        """
-        Преобразует строку из БД в datetime с правильным часовым поясом
-        """
-        # Парсим строку в naive datetime
-        naive_dt = datetime.strptime(deadline_str, '%Y-%m-%d %H:%M:%S')
-        
-        # Так как в БД хранится UTC, добавляем UTC timezone
-        utc_dt = pytz.UTC.localize(naive_dt)
-        
-        # Конвертируем в локальный часовой пояс
-        local_dt = utc_dt.astimezone(self.timezone)
-        
-        return local_dt
-    
     def add_user(self, user_id: int, username: str = None, first_name: str = None, last_name: str = None):
         """Добавление или обновление пользователя"""
         with sqlite3.connect(self.db_path) as conn:
@@ -75,21 +57,62 @@ class Database:
                 INSERT OR REPLACE INTO users (user_id, username, first_name, last_name, created_at)
                 VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
             """, (user_id, username, first_name, last_name))
+            
+            # Добавляем стандартные категории для нового пользователя
+            default_categories = ["Без категории", "Работа", "Личное", "Учеба", "Здоровье", "Финансы"]
+            for category in default_categories:
+                try:
+                    conn.execute("""
+                        INSERT INTO categories (user_id, category_name)
+                        VALUES (?, ?)
+                    """, (user_id, category))
+                except sqlite3.IntegrityError:
+                    pass
     
-    def add_task(self, user_id: int, task_text: str, deadline_input) -> int:
-        """
-        Добавление новой задачи
+    def add_category(self, user_id: int, category_name: str):
+        """Добавление новой категории для пользователя"""
+        with sqlite3.connect(self.db_path) as conn:
+            try:
+                conn.execute("""
+                    INSERT INTO categories (user_id, category_name)
+                    VALUES (?, ?)
+                """, (user_id, category_name))
+                return True
+            except sqlite3.IntegrityError:
+                return False  # Категория уже существует
+    
+    def get_user_categories(self, user_id: int) -> List[str]:
+        """Получение всех категорий пользователя"""
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.execute("""
+                SELECT category_name FROM categories 
+                WHERE user_id = ?
+                ORDER BY category_name
+            """, (user_id,))
+            return [row[0] for row in cursor.fetchall()]
+    
+    def _format_deadline_for_db(self, dt: datetime) -> str:
+        """Преобразует datetime в строку для сохранения в БД (UTC)"""
+        if dt.tzinfo is not None:
+            dt_utc = dt.astimezone(pytz.UTC)
+        else:
+            local_dt = self.timezone.localize(dt)
+            dt_utc = local_dt.astimezone(pytz.UTC)
+        return dt_utc.strftime('%Y-%m-%d %H:%M:%S')
+    
+    def _parse_deadline_from_db(self, deadline_str: str) -> datetime:
+        """Преобразует строку из БД в datetime с локальным часовым поясом"""
+        naive_dt = datetime.strptime(deadline_str, '%Y-%m-%d %H:%M:%S')
+        utc_dt = pytz.UTC.localize(naive_dt)
+        return utc_dt.astimezone(self.timezone)
+    
+    def add_task(self, user_id: int, task_text: str, deadline_input, 
+                 category: str = "Без категории", priority: str = "Средний") -> int:
+        """Добавление новой задачи с категорией и приоритетом"""
         
-        Args:
-            user_id: ID пользователя
-            task_text: текст задачи
-            deadline_input: может быть строкой или datetime объектом
-        """
         # Преобразуем входные данные в datetime объект
         if isinstance(deadline_input, str):
-            # Если пришла строка, парсим её
             try:
-                # Пробуем разные форматы
                 for fmt in ['%Y-%m-%d %H:%M:%S', '%d.%m.%Y %H:%M', '%Y-%m-%d %H:%M']:
                     try:
                         dt = datetime.strptime(deadline_input, fmt)
@@ -105,71 +128,59 @@ class Database:
         else:
             raise TypeError(f"Неподдерживаемый тип для deadline: {type(deadline_input)}")
         
-        # Форматируем для сохранения в БД
         deadline_str = self._format_deadline_for_db(dt)
         
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.execute("""
-                INSERT INTO tasks (user_id, task_text, deadline)
-                VALUES (?, ?, ?)
+                INSERT INTO tasks (user_id, task_text, deadline, category, priority)
+                VALUES (?, ?, ?, ?, ?)
                 RETURNING id
-            """, (user_id, task_text, deadline_str))
+            """, (user_id, task_text, deadline_str, category, priority))
             task_id = cursor.fetchone()[0]
+            
+            # Если категория новая, добавляем её в список категорий
+            if category and category != "Без категории":
+                try:
+                    conn.execute("""
+                        INSERT INTO categories (user_id, category_name)
+                        VALUES (?, ?)
+                    """, (user_id, category))
+                except sqlite3.IntegrityError:
+                    pass  # Категория уже существует
+            
             return task_id
     
-    def get_user_tasks(self, user_id: int, status: str = None) -> List[Dict]:
-        """Получение задач пользователя с правильным отображением даты"""
+    def get_user_tasks(self, user_id: int, status: str = None, category: str = None) -> List[Dict]:
+        """Получение задач с фильтрацией по статусу и категории"""
         with sqlite3.connect(self.db_path) as conn:
             conn.row_factory = sqlite3.Row
+            query = "SELECT * FROM tasks WHERE user_id = ?"
+            params = [user_id]
+            
             if status:
-                cursor = conn.execute("""
-                    SELECT * FROM tasks 
-                    WHERE user_id = ? AND status = ?
-                    ORDER BY deadline
-                """, (user_id, status))
-            else:
-                cursor = conn.execute("""
-                    SELECT * FROM tasks 
-                    WHERE user_id = ?
-                    ORDER BY 
-                        CASE status 
-                            WHEN 'active' THEN 1
-                            WHEN 'completed' THEN 2
-                        END,
-                        deadline
-                """, (user_id,))
+                query += " AND status = ?"
+                params.append(status)
             
-            rows = cursor.fetchall()
+            if category and category != "Все категории":
+                query += " AND category = ?"
+                params.append(category)
+            
+            # Сортировка: сначала по приоритету, потом по дедлайну
+            query += """ ORDER BY 
+                CASE priority 
+                    WHEN 'Высокий' THEN 1 
+                    WHEN 'Средний' THEN 2 
+                    WHEN 'Низкий' THEN 3 
+                    ELSE 4 
+                END, 
+                deadline"""
+            
+            cursor = conn.execute(query, params)
+            
             tasks = []
-            for row in rows:
+            for row in cursor.fetchall():
                 task = dict(row)
-                # Преобразуем дату из БД в локальный часовой пояс
-                if 'deadline' in task:
-                    deadline_dt = self._parse_deadline_from_db(task['deadline'])
-                    # Сохраняем и строковое представление для отображения
-                    task['deadline_display'] = deadline_dt.strftime('%d.%m.%Y %H:%M')
-                    task['deadline_obj'] = deadline_dt
-                tasks.append(task)
-            
-            return tasks
-    
-    def get_all_active_tasks(self) -> List[Dict]:
-        """Получение ВСЕХ активных задач (для планировщика)"""
-        with sqlite3.connect(self.db_path) as conn:
-            conn.row_factory = sqlite3.Row
-            cursor = conn.execute("""
-                SELECT * FROM tasks 
-                WHERE status = 'active'
-                ORDER BY deadline
-            """)
-            
-            rows = cursor.fetchall()
-            tasks = []
-            for row in rows:
-                task = dict(row)
-                # Для планировщика нам нужен datetime объект
-                if 'deadline' in task:
-                    task['deadline_dt'] = self._parse_deadline_from_db(task['deadline'])
+                task['deadline_obj'] = self._parse_deadline_from_db(task['deadline'])
                 tasks.append(task)
             
             return tasks
@@ -182,19 +193,36 @@ class Database:
             row = cursor.fetchone()
             if row:
                 task = dict(row)
-                if 'deadline' in task:
-                    task['deadline_dt'] = self._parse_deadline_from_db(task['deadline'])
+                task['deadline_obj'] = self._parse_deadline_from_db(task['deadline'])
                 return task
             return None
     
+    def update_task(self, task_id: int, **kwargs) -> bool:
+        """Обновление задачи"""
+        allowed_fields = ['task_text', 'deadline', 'category', 'priority', 'status']
+        updates = []
+        values = []
+        
+        for key, value in kwargs.items():
+            if key in allowed_fields:
+                if key == 'deadline' and isinstance(value, datetime):
+                    value = self._format_deadline_for_db(value)
+                updates.append(f"{key} = ?")
+                values.append(value)
+        
+        if not updates:
+            return False
+        
+        values.append(task_id)
+        query = f"UPDATE tasks SET {', '.join(updates)} WHERE id = ?"
+        
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute(query, values)
+            return True
+    
     def complete_task(self, task_id: int):
         """Отметить задачу как выполненную"""
-        with sqlite3.connect(self.db_path) as conn:
-            conn.execute("""
-                UPDATE tasks 
-                SET status = 'completed' 
-                WHERE id = ?
-            """, (task_id,))
+        self.update_task(task_id, status='completed')
     
     def delete_task(self, task_id: int):
         """Удалить задачу"""
@@ -213,26 +241,3 @@ class Database:
         
         with sqlite3.connect(self.db_path) as conn:
             conn.execute(f"UPDATE tasks SET {field} = 1 WHERE id = ?", (task_id,))
-    
-    def get_tasks_for_reminder(self, reminder_type: str, current_time: str) -> List[Dict]:
-        """
-        Получение задач для напоминаний (для обратной совместимости)
-        """
-        field_map = {
-            '3d': 'reminder_3d',
-            '24h': 'reminder_24h',
-            '1h': 'reminder_1h',
-            '5m': 'reminder_5m'
-        }
-        field = field_map.get(reminder_type)
-        
-        with sqlite3.connect(self.db_path) as conn:
-            conn.row_factory = sqlite3.Row
-            cursor = conn.execute(f"""
-                SELECT * FROM tasks 
-                WHERE status = 'active' 
-                AND {field} = 0
-                AND datetime(deadline) <= datetime(?)
-            """, (current_time,))
-            
-            return [dict(row) for row in cursor.fetchall()]
