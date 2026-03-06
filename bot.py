@@ -26,7 +26,14 @@ if not BOT_TOKEN:
     sys.exit(1)
 
 # Настройка логирования
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler('bot.log', encoding='utf-8'),
+        logging.StreamHandler(sys.stdout)
+    ]
+)
 logger = logging.getLogger(__name__)
 
 # Инициализация
@@ -49,12 +56,15 @@ class TaskStates(StatesGroup):
     waiting_for_category = State()
     waiting_for_new_category = State()
     waiting_for_priority = State()
+    waiting_for_recurring = State()
+    waiting_for_recurring_interval = State()
     waiting_for_deadline = State()
     waiting_for_edit_task_id = State()
     waiting_for_edit_text = State()
     waiting_for_edit_deadline = State()
     waiting_for_edit_category = State()
     waiting_for_edit_priority = State()
+    waiting_for_edit_recurring = State()
 
 # --- Клавиатуры ---
 def get_main_keyboard():
@@ -77,6 +87,16 @@ def get_priority_keyboard():
         [InlineKeyboardButton(text="🔵 Низкий", callback_data="priority:low")]
     ])
 
+def get_recurring_keyboard():
+    """Клавиатура выбора типа повторения"""
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔁 Каждый день", callback_data="recurring:day")],
+        [InlineKeyboardButton(text="🔁 Каждую неделю", callback_data="recurring:week")],
+        [InlineKeyboardButton(text="🔁 Каждый месяц", callback_data="recurring:month")],
+        [InlineKeyboardButton(text="🔁 Каждый год", callback_data="recurring:year")],
+        [InlineKeyboardButton(text="⏹️ Не повторять", callback_data="recurring:none")]
+    ])
+
 def get_category_keyboard(categories):
     """Клавиатура выбора категории"""
     buttons = []
@@ -90,7 +110,8 @@ def get_today_week_keyboard():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📅 Сегодня", callback_data="period:today")],
         [InlineKeyboardButton(text="📆 Завтра", callback_data="period:tomorrow")],
-        [InlineKeyboardButton(text="📅 Эта неделя", callback_data="period:week")]
+        [InlineKeyboardButton(text="📅 Эта неделя", callback_data="period:week")],
+        [InlineKeyboardButton(text="📅 Следующая неделя", callback_data="period:next_week")]
     ])
 
 def get_task_actions_keyboard(task_id):
@@ -107,7 +128,8 @@ def get_edit_options_keyboard(task_id):
         [InlineKeyboardButton(text="📝 Текст", callback_data=f"edit_text:{task_id}")],
         [InlineKeyboardButton(text="📅 Дедлайн", callback_data=f"edit_deadline:{task_id}")],
         [InlineKeyboardButton(text="📁 Категория", callback_data=f"edit_category:{task_id}")],
-        [InlineKeyboardButton(text="⚡ Приоритет", callback_data=f"edit_priority:{task_id}")]
+        [InlineKeyboardButton(text="⚡ Приоритет", callback_data=f"edit_priority:{task_id}")],
+        [InlineKeyboardButton(text="🔄 Повторение", callback_data=f"edit_recurring:{task_id}")]
     ])
 
 def get_calendar_keyboard():
@@ -130,7 +152,11 @@ async def cmd_start(message: types.Message):
     await message.answer(
         f"👋 **Привет, {user.first_name}!**\n\n"
         f"📍 Часовой пояс: {TIMEZONE}\n"
-        f"🕐 Текущее время: {now.strftime('%d.%m.%Y %H:%M')}",
+        f"🕐 Текущее время: {now.strftime('%d.%m.%Y %H:%M')}\n\n"
+        f"✨ **Новые функции:**\n"
+        f"• 🔁 Повторяющиеся задачи (день/неделя/месяц/год)\n"
+        f"• 📊 Детальная статистика\n"
+        f"• 📅 Задачи на период",
         reply_markup=get_main_keyboard()
     )
 
@@ -194,12 +220,48 @@ async def process_priority(callback: types.CallbackQuery, state: FSMContext):
     priority_map = {"high": "Высокий", "medium": "Средний", "low": "Низкий"}
     priority = priority_map[callback.data.split(":")[1]]
     await state.update_data(priority=priority)
-    await state.set_state(TaskStates.waiting_for_deadline)
+    
+    # Спрашиваем про повторение
+    await state.set_state(TaskStates.waiting_for_recurring)
     await callback.message.answer(
-        "📅 Выберите дату дедлайна:",
-        reply_markup=get_calendar_keyboard()
+        "🔄 Это повторяющаяся задача?",
+        reply_markup=get_recurring_keyboard()
     )
     await callback.answer()
+
+@dp.callback_query(TaskStates.waiting_for_recurring, F.data.startswith("recurring:"))
+async def process_recurring(callback: types.CallbackQuery, state: FSMContext):
+    """Обработка выбора типа повторения"""
+    recurring_type = callback.data.split(":")[1]
+    
+    if recurring_type == "none":
+        await state.update_data(recurring_type=None, recurring_interval=1)
+        await state.set_state(TaskStates.waiting_for_deadline)
+        await callback.message.answer(
+            "📅 Выберите дату дедлайна:",
+            reply_markup=get_calendar_keyboard()
+        )
+    else:
+        await state.update_data(recurring_type=recurring_type)
+        await state.set_state(TaskStates.waiting_for_recurring_interval)
+        await callback.message.answer(
+            f"Введите интервал (например, 2 для повторения каждые 2 {recurring_type}а):"
+        )
+    await callback.answer()
+
+@dp.message(TaskStates.waiting_for_recurring_interval)
+async def process_recurring_interval(message: types.Message, state: FSMContext):
+    """Обработка интервала повторения"""
+    try:
+        interval = int(message.text.strip())
+        await state.update_data(recurring_interval=interval)
+        await state.set_state(TaskStates.waiting_for_deadline)
+        await message.answer(
+            "📅 Выберите дату дедлайна:",
+            reply_markup=get_calendar_keyboard()
+        )
+    except ValueError:
+        await message.answer("❌ Введите число:")
 
 @dp.callback_query(TaskStates.waiting_for_deadline, F.data.startswith("date:"))
 async def process_deadline_date(callback: types.CallbackQuery, state: FSMContext):
@@ -260,16 +322,26 @@ async def process_deadline_input(message: types.Message, state: FSMContext):
                 task_text=data['task_text'],
                 deadline_input=deadline_local,
                 category=data.get('category', 'Без категории'),
-                priority=data.get('priority', 'Средний')
+                priority=data.get('priority', 'Средний'),
+                recurring_type=data.get('recurring_type'),
+                recurring_interval=data.get('recurring_interval', 1)
             )
             
             await state.clear()
+            
+            # Формируем сообщение о создании
+            recurring_text = ""
+            if data.get('recurring_type'):
+                rt = data['recurring_type']
+                ri = data.get('recurring_interval', 1)
+                ru = "день" if rt == "day" else "неделю" if rt == "week" else "месяц" if rt == "month" else "год"
+                recurring_text = f"\n🔄 Повторяется: кажд{'' if ri==1 else 'ые'} {ri} {ru}"
             
             await message.answer(
                 f"✅ **Задача создана!**\n\n"
                 f"📌 **{data['task_text']}**\n"
                 f"📁 Категория: {data.get('category', 'Без категории')}\n"
-                f"⚡ Приоритет: {data.get('priority', 'Средний')}\n"
+                f"⚡ Приоритет: {data.get('priority', 'Средний')}{recurring_text}\n"
                 f"📅 Дедлайн: {deadline_local.strftime('%d.%m.%Y %H:%M')}\n"
                 f"🆔 ID: {task_id}",
                 reply_markup=get_main_keyboard()
@@ -288,9 +360,11 @@ async def cmd_tasks(message: types.Message):
         await message.answer("📭 Нет активных задач.")
         return
     
-    for task in tasks:
+    for task in tasks[:10]:  # Показываем первые 10
+        # Добавляем информацию о повторении
+        recurring_emoji = "🔄" if task.get('recurring_type') else ""
         text = (
-            f"📌 **{task['task_text']}**\n"
+            f"{recurring_emoji} **{task['task_text']}**\n"
             f"📁 {task['category']} | ⚡ {task['priority']}\n"
             f"📅 {task['deadline_obj'].strftime('%d.%m.%Y %H:%M')}"
         )
@@ -318,6 +392,7 @@ async def cmd_stats(message: types.Message):
         f"📝 Всего задач: {stats['total']}\n"
         f"✅ Выполнено: {stats['completed']}\n"
         f"⏳ В работе: {stats['active']}\n"
+        f"🔄 Повторяющихся: {stats['recurring']}\n"
         f"🎯 Прогресс: {stats['completion_rate']:.1f}%\n\n"
         f"📁 **По категориям:**\n{cat_text}\n"
         f"⚡ **По приоритетам:**\n{pri_text}"
@@ -347,10 +422,15 @@ async def show_period(callback: types.CallbackQuery):
         start = tz.localize(datetime(tomorrow.year, tomorrow.month, tomorrow.day, 0, 0, 0))
         end = start + timedelta(days=1)
         title = f"📆 Задачи на завтра ({tomorrow.strftime('%d.%m.%Y')})"
-    else:  # week
+    elif period == "week":
         start = tz.localize(datetime(now.year, now.month, now.day, 0, 0, 0))
         end = start + timedelta(days=7)
         title = f"📅 Задачи на неделю ({now.strftime('%d.%m')} - {(now+timedelta(days=6)).strftime('%d.%m.%Y')})"
+    else:  # next_week
+        next_week = now + timedelta(days=7)
+        start = tz.localize(datetime(next_week.year, next_week.month, next_week.day, 0, 0, 0))
+        end = start + timedelta(days=7)
+        title = f"📅 Задачи на след.неделю ({next_week.strftime('%d.%m')} - {(next_week+timedelta(days=6)).strftime('%d.%m.%Y')})"
     
     # Фильтруем задачи
     tasks = db.get_user_tasks(callback.from_user.id, status='active')
@@ -360,8 +440,9 @@ async def show_period(callback: types.CallbackQuery):
         await callback.message.edit_text(f"{title}\n\n🎉 Нет задач!")
     else:
         text = f"{title}\n\n"
-        for t in filtered[:10]:  # Показываем первые 10
-            text += f"• **{t['task_text'][:30]}** - {t['deadline_obj'].strftime('%d.%m %H:%M')}\n"
+        for t in filtered[:10]:
+            recurring_emoji = "🔄 " if t.get('recurring_type') else ""
+            text += f"• {recurring_emoji}**{t['task_text'][:30]}** - {t['deadline_obj'].strftime('%d.%m %H:%M')}\n"
         await callback.message.edit_text(text)
     
     await callback.answer()
@@ -380,8 +461,18 @@ async def cmd_categories(message: types.Message):
 async def complete_task(callback: types.CallbackQuery):
     """Отметка задачи как выполненной"""
     task_id = int(callback.data.split(":")[1])
-    db.complete_task(task_id)
-    await callback.message.edit_text("✅ Задача выполнена! Отличная работа! 🎉")
+    task = db.get_task(task_id)
+    
+    if db.complete_task(task_id):
+        if task and task.get('recurring_type'):
+            await callback.message.edit_text(
+                "✅ Задача выполнена! 🔄 Создана новая повторяющаяся задача."
+            )
+        else:
+            await callback.message.edit_text("✅ Задача выполнена! Отличная работа! 🎉")
+    else:
+        await callback.message.edit_text("❌ Не удалось выполнить задачу")
+    
     await callback.answer()
 
 @dp.callback_query(F.data.startswith("delete:"))
@@ -501,6 +592,36 @@ async def process_edit_priority(callback: types.CallbackQuery, state: FSMContext
     await callback.message.answer("✅ Приоритет обновлен!", reply_markup=get_main_keyboard())
     await callback.answer()
 
+@dp.callback_query(F.data.startswith("edit_recurring:"))
+async def edit_task_recurring(callback: types.CallbackQuery, state: FSMContext):
+    """Редактирование повторения"""
+    task_id = int(callback.data.split(":")[1])
+    await state.update_data(edit_task_id=task_id)
+    await state.set_state(TaskStates.waiting_for_edit_recurring)
+    await callback.message.answer(
+        "Выберите тип повторения:",
+        reply_markup=get_recurring_keyboard()
+    )
+    await callback.answer()
+
+@dp.callback_query(TaskStates.waiting_for_edit_recurring, F.data.startswith("recurring:"))
+async def process_edit_recurring(callback: types.CallbackQuery, state: FSMContext):
+    """Обработка изменения повторения"""
+    recurring_type = callback.data.split(":")[1]
+    data = await state.get_data()
+    
+    if recurring_type == "none":
+        db.update_task(data['edit_task_id'], recurring_type=None, recurring_interval=1)
+        await state.clear()
+        await callback.message.answer("✅ Повторение отключено!", reply_markup=get_main_keyboard())
+    else:
+        await state.update_data(recurring_type=recurring_type)
+        await state.set_state(TaskStates.waiting_for_recurring_interval)
+        await callback.message.answer(
+            f"Введите интервал (например, 2 для повторения каждые 2 {recurring_type}а):"
+        )
+    await callback.answer()
+
 @dp.message(F.text == "ℹ️ Помощь")
 @dp.message(Command("help"))
 async def cmd_help(message: types.Message):
@@ -514,29 +635,18 @@ async def cmd_help(message: types.Message):
         "• `📊 Статистика` - статистика выполнения\n"
         "• `📅 Сегодня/Неделя` - задачи на период\n"
         "• `📁 Категории` - список категорий\n\n"
+        "**✨ Новые возможности:**\n"
+        "• 🔁 **Повторяющиеся задачи** (день/неделя/месяц/год)\n"
+        "  - При выполнении автоматически создаётся новая\n"
+        "  - Можно настроить интервал (каждые 2 дня и т.д.)\n\n"
         "**Управление задачами:**\n"
         "• ✅ Отметить выполненной\n"
-        "• ✏️ Редактировать (текст, дату, категорию, приоритет)\n"
+        "• ✏️ Редактировать (текст, дату, категорию, приоритет, повторение)\n"
         "• 🗑 Удалить\n\n"
         f"📍 **Часовой пояс:** {TIMEZONE}\n"
         f"🕐 **Текущее время:** {now.strftime('%d.%m.%Y %H:%M')}"
     )
     await message.answer(help_text, reply_markup=get_main_keyboard())
-
-@dp.message(F.text == "❌ Удалить задачу")
-async def cmd_delete_prompt(message: types.Message):
-    """Меню удаления задачи (для совместимости)"""
-    tasks = db.get_user_tasks(message.from_user.id, status='active')
-    if not tasks:
-        await message.answer("📭 Нет задач для удаления.")
-        return
-    
-    for task in tasks[:5]:
-        text = f"🗑 **{task['task_text'][:30]}**"
-        keyboard = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="Удалить", callback_data=f"delete:{task['id']}")]
-        ])
-        await message.answer(text, reply_markup=keyboard)
 
 @dp.message()
 async def handle_unknown(message: types.Message):
@@ -558,10 +668,37 @@ async def message_sender_worker(queue):
         try:
             chat_id, text = await queue.get()
             await bot.send_message(chat_id=chat_id, text=text)
+            logger.info(f"📨 Отправлено сообщение пользователю {chat_id}")
         except Exception as e:
-            logger.error(f"Ошибка отправки: {e}")
+            logger.error(f"❌ Ошибка отправки: {e}")
         finally:
             queue.task_done()
+
+# --- Тестовая команда для проверки напоминаний ---
+@dp.message(Command("test_reminder"))
+async def cmd_test_reminder(message: types.Message):
+    """Тестовая команда для проверки напоминаний"""
+    user_id = message.from_user.id
+    now = get_minsk_time()
+    test_deadline = now + timedelta(minutes=2)
+    
+    task_id = db.add_task(
+        user_id=user_id,
+        task_text="🔔 ТЕСТОВОЕ НАПОМИНАНИЕ",
+        deadline_input=test_deadline,
+        category="Тест",
+        priority="Высокий"
+    )
+    
+    await message.answer(
+        f"✅ **Тестовая задача создана!**\n\n"
+        f"📌 Задача: 🔔 ТЕСТОВОЕ НАПОМИНАНИЕ\n"
+        f"📅 Дедлайн: {test_deadline.strftime('%d.%m.%Y %H:%M')}\n"
+        f"⏰ Ожидайте напоминание через 2 минуты...\n"
+        f"🆔 ID: {task_id}"
+    )
+    
+    logger.info(f"🔔 Тестовая задача {task_id} создана, дедлайн через 2 минуты")
 
 # --- Главная функция ---
 async def main():
@@ -573,6 +710,7 @@ async def main():
     scheduler = ReminderScheduler(db, bot, TIMEZONE, message_queue)
     scheduler.start()
     
+    logger.info("🚀 Бот запущен")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
