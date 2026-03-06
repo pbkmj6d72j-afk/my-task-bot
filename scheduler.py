@@ -1,6 +1,7 @@
 import logging
 import sys
 import asyncio
+import traceback
 from datetime import datetime, timedelta
 import pytz
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -39,7 +40,6 @@ class ReminderScheduler:
         logger.info("🆕 ПЛАНИРОВЩИК ИНИЦИАЛИЗИРОВАН")
         logger.info(f"📅 Часовой пояс: {timezone}")
         logger.info(f"📨 Очередь сообщений: {'✅ Есть' if message_queue else '❌ НЕТ'}")
-        logger.info(f"🤖 Бот передан: {'✅ Да' if bot else '❌ Нет'}")
         logger.info("="*60)
 
     def _make_aware(self, dt):
@@ -67,6 +67,16 @@ class ReminderScheduler:
                 replace_existing=True,
                 max_instances=1
             )
+            
+            # Добавляем задачу проверки дополнительных напоминаний
+            self.scheduler.add_job(
+                self.check_custom_reminders,
+                IntervalTrigger(minutes=1),
+                id='check_custom_reminders',
+                replace_existing=True,
+                max_instances=1
+            )
+            
             self.scheduler.start()
             logger.info("✅ ПЛАНИРОВЩИК УСПЕШНО ЗАПУЩЕН")
             jobs = self.scheduler.get_jobs()
@@ -78,12 +88,12 @@ class ReminderScheduler:
             return False
 
     async def check_reminders(self):
-        """Проверка напоминаний (запускается каждую минуту)"""
+        """Проверка стандартных напоминаний (запускается каждую минуту)"""
         self.check_count += 1
         try:
             now = datetime.now(self.timezone)
             logger.info("="*70)
-            logger.info(f"🔍 ПРОВЕРКА НАПОМИНАНИЙ #{self.check_count} в {now.strftime('%H:%M:%S')}")
+            logger.info(f"🔍 ПРОВЕРКА СТАНДАРТНЫХ НАПОМИНАНИЙ #{self.check_count} в {now.strftime('%H:%M:%S')}")
 
             # Получаем все активные задачи
             all_tasks = self.db.get_all_active_tasks()
@@ -133,7 +143,7 @@ class ReminderScheduler:
                     # Проверяем напоминание за 5 минут
                     if not reminder_5m and 0 < minutes_left <= 5:
                         logger.info(f"   ✅ НУЖНО ОТПРАВИТЬ: напоминание за 5 минут")
-                        await self._send_reminder(task, '5 минут')
+                        await self._send_reminder(task, f"5 минут")
                         self.db.mark_reminder_sent(task_id, '5m')
                     
                     # Проверяем напоминание за 1 час
@@ -169,8 +179,41 @@ class ReminderScheduler:
             logger.error(f"❌ КРИТИЧЕСКАЯ ОШИБКА: {e}")
             logger.error(traceback.format_exc())
 
+    async def check_custom_reminders(self):
+        """Проверка дополнительных напоминаний"""
+        try:
+            now = datetime.now(self.timezone)
+            logger.info(f"🔍 ПРОВЕРКА ДОПОЛНИТЕЛЬНЫХ НАПОМИНАНИЙ в {now.strftime('%H:%M:%S')}")
+            
+            # Получаем все неотправленные напоминания
+            reminders = self.db.get_pending_reminders()
+            
+            for reminder in reminders:
+                try:
+                    reminder_time_naive = datetime.strptime(reminder['reminder_time'], '%Y-%m-%d %H:%M:%S')
+                    reminder_time_utc = pytz.UTC.localize(reminder_time_naive)
+                    reminder_time = reminder_time_utc.astimezone(self.timezone)
+                    
+                    if reminder_time <= now:
+                        logger.info(f"✅ НУЖНО ОТПРАВИТЬ дополнительное напоминание {reminder['id']}")
+                        
+                        # Формируем сообщение
+                        message = f"⏰ **НАПОМИНАНИЕ!**\n\n"
+                        message += f"📌 **Задача:** {reminder['task_text']}\n"
+                        if reminder['reminder_text']:
+                            message += f"📝 **Заметка:** {reminder['reminder_text']}\n"
+                        
+                        await self._send_raw_reminder(reminder['user_id'], message)
+                        self.db.mark_reminder_sent(reminder['id'])
+                        
+                except Exception as e:
+                    logger.error(f"❌ Ошибка при обработке напоминания {reminder.get('id')}: {e}")
+                    
+        except Exception as e:
+            logger.error(f"❌ Ошибка проверки дополнительных напоминаний: {e}")
+
     async def _send_reminder(self, task, time_text):
-        """Отправка напоминания"""
+        """Отправка стандартного напоминания"""
         try:
             # Парсим дедлайн из БД
             deadline_naive = datetime.strptime(task['deadline'], '%Y-%m-%d %H:%M:%S')
@@ -188,9 +231,17 @@ class ReminderScheduler:
                 else:
                     recurring_text = f"\n🔄 Повторяется: каждые {ri} {rt_ru}а"
             
+            # Проверяем наличие подзадач
+            subtasks = self.db.get_subtasks(task['id'])
+            subtasks_text = ""
+            if subtasks:
+                completed = sum(1 for s in subtasks if s['completed'])
+                total = len(subtasks)
+                subtasks_text = f"\n📋 Подзадачи: {completed}/{total} выполнено"
+            
             message = (
                 f"⏰ **НАПОМИНАНИЕ!**\n\n"
-                f"📌 **Задача:** {task['task_text']}\n"
+                f"📌 **Задача:** {task['task_text']}{subtasks_text}\n"
                 f"⏳ **Осталось:** {time_text}\n"
                 f"📅 **Дедлайн:** {deadline.strftime('%d.%m.%Y %H:%M')}{recurring_text}"
             )
@@ -207,6 +258,18 @@ class ReminderScheduler:
         except Exception as e:
             logger.error(f"❌ Ошибка отправки напоминания: {e}")
             logger.error(traceback.format_exc())
+
+    async def _send_raw_reminder(self, user_id, message):
+        """Отправка произвольного напоминания"""
+        try:
+            if self.message_queue:
+                await self.message_queue.put((user_id, message))
+                logger.info(f"✅ Дополнительное напоминание добавлено в очередь")
+            else:
+                await self.bot.send_message(chat_id=user_id, text=message)
+                logger.info(f"✅ Дополнительное напоминание отправлено напрямую")
+        except Exception as e:
+            logger.error(f"❌ Ошибка отправки дополнительного напоминания: {e}")
 
     def stop(self):
         """Остановка планировщика"""

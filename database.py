@@ -14,7 +14,7 @@ class Database:
         self.init_db()
 
     def init_db(self):
-        """Создание таблиц с поддержкой повторяющихся задач"""
+        """Создание таблиц с поддержкой подзадач и множественных напоминаний"""
         with sqlite3.connect(self.db_path) as conn:
             # Таблица пользователей
             conn.execute("""
@@ -27,7 +27,7 @@ class Database:
                 )
             """)
 
-            # Таблица задач с полями для повторения
+            # Таблица задач (основные)
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS tasks (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -40,11 +40,39 @@ class Database:
                     recurring_type TEXT DEFAULT NULL,
                     recurring_interval INTEGER DEFAULT 1,
                     parent_task_id INTEGER DEFAULT NULL,
+                    has_subtasks BOOLEAN DEFAULT 0,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     reminder_3d BOOLEAN DEFAULT 0,
                     reminder_24h BOOLEAN DEFAULT 0,
                     reminder_1h BOOLEAN DEFAULT 0,
-                    reminder_5m BOOLEAN DEFAULT 0
+                    reminder_5m BOOLEAN DEFAULT 0,
+                    reminder_custom TEXT DEFAULT NULL,
+                    reminder_sent BOOLEAN DEFAULT 0
+                )
+            """)
+
+            # Таблица подзадач
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS subtasks (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    task_id INTEGER NOT NULL,
+                    subtask_text TEXT NOT NULL,
+                    completed BOOLEAN DEFAULT 0,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (task_id) REFERENCES tasks (id) ON DELETE CASCADE
+                )
+            """)
+
+            # Таблица множественных напоминаний
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS reminders (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    task_id INTEGER NOT NULL,
+                    reminder_time TIMESTAMP NOT NULL,
+                    reminder_text TEXT DEFAULT NULL,
+                    sent BOOLEAN DEFAULT 0,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (task_id) REFERENCES tasks (id) ON DELETE CASCADE
                 )
             """)
 
@@ -54,6 +82,7 @@ class Database:
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     user_id INTEGER NOT NULL,
                     category_name TEXT NOT NULL,
+                    color TEXT DEFAULT '#3498db',
                     UNIQUE(user_id, category_name)
                 )
             """)
@@ -66,34 +95,43 @@ class Database:
                 VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
             """, (user_id, username, first_name, last_name))
 
-            # Добавляем стандартные категории
-            default_categories = ["Без категории", "Работа", "Личное", "Учеба", "Здоровье", "Финансы"]
-            for category in default_categories:
+            # Добавляем стандартные категории с цветами
+            default_categories = [
+                ("Без категории", "#95a5a6"),
+                ("Работа", "#e74c3c"),
+                ("Личное", "#2ecc71"),
+                ("Учеба", "#f39c12"),
+                ("Здоровье", "#e91e63"),
+                ("Финансы", "#3498db")
+            ]
+            
+            for category, color in default_categories:
                 try:
                     conn.execute("""
-                        INSERT INTO categories (user_id, category_name)
-                        VALUES (?, ?)
-                    """, (user_id, category))
+                        INSERT INTO categories (user_id, category_name, color)
+                        VALUES (?, ?, ?)
+                    """, (user_id, category, color))
                 except sqlite3.IntegrityError:
                     pass
 
-    def get_user_categories(self, user_id: int) -> List[str]:
-        """Получение всех категорий пользователя"""
+    def get_user_categories(self, user_id: int) -> List[Dict]:
+        """Получение всех категорий пользователя с цветами"""
         with sqlite3.connect(self.db_path) as conn:
+            conn.row_factory = sqlite3.Row
             cursor = conn.execute("""
-                SELECT category_name FROM categories 
+                SELECT * FROM categories 
                 WHERE user_id = ? ORDER BY category_name
             """, (user_id,))
-            return [row[0] for row in cursor.fetchall()]
+            return [dict(row) for row in cursor.fetchall()]
 
-    def add_category(self, user_id: int, category_name: str):
-        """Добавление новой категории"""
+    def add_category(self, user_id: int, category_name: str, color: str = "#3498db"):
+        """Добавление новой категории с цветом"""
         with sqlite3.connect(self.db_path) as conn:
             try:
                 conn.execute("""
-                    INSERT INTO categories (user_id, category_name)
-                    VALUES (?, ?)
-                """, (user_id, category_name))
+                    INSERT INTO categories (user_id, category_name, color)
+                    VALUES (?, ?, ?)
+                """, (user_id, category_name, color))
                 return True
             except sqlite3.IntegrityError:
                 return False
@@ -158,6 +196,71 @@ class Database:
             logger.info(f"✅ Задача {task_id} создана. Повторение: {recurring_type if recurring_type else 'нет'}")
             return task_id
 
+    def add_subtask(self, task_id: int, subtask_text: str) -> int:
+        """Добавление подзадачи"""
+        with sqlite3.connect(self.db_path) as conn:
+            # Отмечаем, что у задачи есть подзадачи
+            conn.execute("UPDATE tasks SET has_subtasks = 1 WHERE id = ?", (task_id,))
+            
+            cursor = conn.execute("""
+                INSERT INTO subtasks (task_id, subtask_text)
+                VALUES (?, ?)
+                RETURNING id
+            """, (task_id, subtask_text))
+            subtask_id = cursor.fetchone()[0]
+            logger.info(f"✅ Подзадача {subtask_id} добавлена к задаче {task_id}")
+            return subtask_id
+
+    def get_subtasks(self, task_id: int) -> List[Dict]:
+        """Получение всех подзадач для задачи"""
+        with sqlite3.connect(self.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.execute("""
+                SELECT * FROM subtasks 
+                WHERE task_id = ?
+                ORDER BY created_at
+            """, (task_id,))
+            return [dict(row) for row in cursor.fetchall()]
+
+    def complete_subtask(self, subtask_id: int):
+        """Отметить подзадачу как выполненную"""
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute("UPDATE subtasks SET completed = 1 WHERE id = ?", (subtask_id,))
+            logger.info(f"✅ Подзадача {subtask_id} выполнена")
+
+    def add_reminder(self, task_id: int, reminder_time: datetime, reminder_text: str = None):
+        """Добавление дополнительного напоминания"""
+        reminder_str = self._format_deadline_for_db(reminder_time)
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.execute("""
+                INSERT INTO reminders (task_id, reminder_time, reminder_text)
+                VALUES (?, ?, ?)
+                RETURNING id
+            """, (task_id, reminder_str, reminder_text))
+            reminder_id = cursor.fetchone()[0]
+            logger.info(f"⏰ Напоминание {reminder_id} добавлено к задаче {task_id} на {reminder_time}")
+            return reminder_id
+
+    def get_pending_reminders(self) -> List[Dict]:
+        """Получение всех неотправленных напоминаний"""
+        now = datetime.now(pytz.UTC)
+        now_str = now.strftime('%Y-%m-%d %H:%M:%S')
+        
+        with sqlite3.connect(self.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.execute("""
+                SELECT r.*, t.user_id, t.task_text 
+                FROM reminders r
+                JOIN tasks t ON r.task_id = t.id
+                WHERE r.sent = 0 AND r.reminder_time <= ?
+            """, (now_str,))
+            return [dict(row) for row in cursor.fetchall()]
+
+    def mark_reminder_sent(self, reminder_id: int):
+        """Отметить напоминание как отправленное"""
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute("UPDATE reminders SET sent = 1 WHERE id = ?", (reminder_id,))
+
     def get_user_tasks(self, user_id: int, status: str = None, category: str = None) -> List[Dict]:
         """Получение задач пользователя"""
         with sqlite3.connect(self.db_path) as conn:
@@ -198,6 +301,52 @@ class Database:
             
             tasks = []
             for row in rows:
+                task = dict(row)
+                task['deadline_obj'] = self._parse_deadline_from_db(task['deadline'])
+                tasks.append(task)
+            return tasks
+
+    def get_overdue_tasks(self, user_id: int) -> List[Dict]:
+        """Получение просроченных задач"""
+        now = datetime.now(self.timezone)
+        now_str = self._format_deadline_for_db(now)
+        
+        with sqlite3.connect(self.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.execute("""
+                SELECT * FROM tasks 
+                WHERE user_id = ? AND status = 'active' AND deadline <= ?
+                ORDER BY deadline
+            """, (user_id, now_str))
+            
+            tasks = []
+            for row in cursor.fetchall():
+                task = dict(row)
+                task['deadline_obj'] = self._parse_deadline_from_db(task['deadline'])
+                tasks.append(task)
+            return tasks
+
+    def get_tasks_by_month(self, user_id: int, year: int, month: int) -> List[Dict]:
+        """Получение задач за конкретный месяц"""
+        start = datetime(year, month, 1, 0, 0, 0)
+        if month == 12:
+            end = datetime(year + 1, 1, 1, 0, 0, 0)
+        else:
+            end = datetime(year, month + 1, 1, 0, 0, 0)
+        
+        start_str = self._format_deadline_for_db(tz.localize(start))
+        end_str = self._format_deadline_for_db(tz.localize(end))
+        
+        with sqlite3.connect(self.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.execute("""
+                SELECT * FROM tasks 
+                WHERE user_id = ? AND deadline >= ? AND deadline < ? AND status = 'active'
+                ORDER BY deadline
+            """, (user_id, start_str, end_str))
+            
+            tasks = []
+            for row in cursor.fetchall():
                 task = dict(row)
                 task['deadline_obj'] = self._parse_deadline_from_db(task['deadline'])
                 tasks.append(task)
@@ -254,7 +403,7 @@ class Database:
             return True
 
     def delete_task(self, task_id: int):
-        """Удалить задачу"""
+        """Удалить задачу (подзадачи удалятся автоматически по FOREIGN KEY)"""
         with sqlite3.connect(self.db_path) as conn:
             conn.execute("DELETE FROM tasks WHERE id = ?", (task_id,))
             logger.info(f"🗑 Задача {task_id} удалена")
@@ -284,7 +433,7 @@ class Database:
             return True
 
     def mark_reminder_sent(self, task_id: int, reminder_type: str):
-        """Отметить, что напоминание отправлено"""
+        """Отметить стандартное напоминание как отправленное"""
         field_map = {'3d': 'reminder_3d', '24h': 'reminder_24h', '1h': 'reminder_1h', '5m': 'reminder_5m'}
         field = field_map.get(reminder_type)
         if field:
@@ -298,6 +447,14 @@ class Database:
             total = conn.execute("SELECT COUNT(*) FROM tasks WHERE user_id = ?", (user_id,)).fetchone()[0]
             active = conn.execute("SELECT COUNT(*) FROM tasks WHERE user_id = ? AND status = 'active'", (user_id,)).fetchone()[0]
             completed = conn.execute("SELECT COUNT(*) FROM tasks WHERE user_id = ? AND status = 'completed'", (user_id,)).fetchone()[0]
+
+            # Просроченные
+            now = datetime.now(self.timezone)
+            now_str = self._format_deadline_for_db(now)
+            overdue = conn.execute("""
+                SELECT COUNT(*) FROM tasks 
+                WHERE user_id = ? AND status = 'active' AND deadline <= ?
+            """, (user_id, now_str)).fetchone()[0]
 
             cat_cursor = conn.execute("""
                 SELECT category, COUNT(*) as count FROM tasks
@@ -313,7 +470,6 @@ class Database:
             """, (user_id,))
             priorities = {row[0]: row[1] for row in pri_cursor.fetchall()}
 
-            # Статистика по повторяющимся задачам
             recurring = conn.execute("""
                 SELECT COUNT(*) FROM tasks 
                 WHERE user_id = ? AND status = 'active' AND recurring_type IS NOT NULL
@@ -323,6 +479,7 @@ class Database:
                 'total': total,
                 'active': active,
                 'completed': completed,
+                'overdue': overdue,
                 'recurring': recurring,
                 'completion_rate': (completed / total * 100) if total > 0 else 0,
                 'categories': categories,
