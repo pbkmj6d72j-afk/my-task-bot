@@ -19,19 +19,39 @@ logger = logging.getLogger(__name__)
 
 class ReminderScheduler:
     def __init__(self, db, bot, timezone='Europe/Minsk', message_queue=None):
+        """
+        Инициализация планировщика
+        
+        Args:
+            db: объект базы данных
+            bot: объект бота
+            timezone: часовой пояс (например, 'Europe/Minsk')
+            message_queue: очередь для отправки сообщений
+        """
         self.db = db
         self.bot = bot
         self.timezone = pytz.timezone(timezone)
         self.message_queue = message_queue
         self.scheduler = AsyncIOScheduler(timezone=self.timezone)
         self.check_count = 0
-        logger.info("="*50)
+        
+        logger.info("="*60)
         logger.info("🆕 ПЛАНИРОВЩИК ИНИЦИАЛИЗИРОВАН")
         logger.info(f"📅 Часовой пояс: {timezone}")
         logger.info(f"📨 Очередь сообщений: {'✅ Есть' if message_queue else '❌ НЕТ'}")
-        logger.info("="*50)
+        logger.info(f"🤖 Бот передан: {'✅ Да' if bot else '❌ Нет'}")
+        logger.info("="*60)
 
     def _make_aware(self, dt):
+        """
+        Преобразует наивное datetime в timezone-aware
+        
+        Args:
+            dt: datetime объект (может быть наивным или aware)
+        
+        Returns:
+            timezone-aware datetime в часовом поясе self.timezone
+        """
         if dt.tzinfo is None:
             return self.timezone.localize(dt)
         return dt.astimezone(self.timezone)
@@ -39,11 +59,13 @@ class ReminderScheduler:
     def start(self):
         """Запуск планировщика"""
         try:
+            # Добавляем задачу проверки каждую минуту
             self.scheduler.add_job(
                 self.check_reminders,
                 IntervalTrigger(minutes=1),
                 id='check_reminders',
-                replace_existing=True
+                replace_existing=True,
+                max_instances=1
             )
             self.scheduler.start()
             logger.info("✅ ПЛАНИРОВЩИК УСПЕШНО ЗАПУЩЕН")
@@ -52,14 +74,15 @@ class ReminderScheduler:
             return True
         except Exception as e:
             logger.error(f"❌ ОШИБКА ЗАПУСКА: {e}")
+            logger.error(traceback.format_exc())
             return False
 
     async def check_reminders(self):
-        """Проверка напоминаний"""
+        """Проверка напоминаний (запускается каждую минуту)"""
         self.check_count += 1
         try:
             now = datetime.now(self.timezone)
-            logger.info("="*60)
+            logger.info("="*70)
             logger.info(f"🔍 ПРОВЕРКА НАПОМИНАНИЙ #{self.check_count} в {now.strftime('%H:%M:%S')}")
 
             # Получаем все активные задачи
@@ -68,18 +91,23 @@ class ReminderScheduler:
 
             if not all_tasks:
                 logger.info("📭 Нет активных задач для проверки")
+                logger.info("="*70)
                 return
 
             for task in all_tasks:
                 try:
                     task_id = task['id']
                     user_id = task['user_id']
-                    task_text = task['task_text'][:30]
+                    task_text = task['task_text'][:50]
                     
-                    # Парсим дедлайн
-                    deadline = self._make_aware(datetime.strptime(task['deadline'], '%Y-%m-%d %H:%M:%S'))
+                    # Парсим дедлайн из БД (всегда в UTC)
+                    deadline_naive = datetime.strptime(task['deadline'], '%Y-%m-%d %H:%M:%S')
+                    # Добавляем часовой пояс (из БД время в UTC)
+                    deadline_utc = pytz.UTC.localize(deadline_naive)
+                    # Конвертируем в локальный часовой пояс
+                    deadline = deadline_utc.astimezone(self.timezone)
                     
-                    # Вычисляем разницу
+                    # Вычисляем разницу между текущим временем и дедлайном
                     time_left = deadline - now
                     minutes_left = int(time_left.total_seconds() / 60)
                     hours_left = int(time_left.total_seconds() / 3600)
@@ -92,10 +120,15 @@ class ReminderScheduler:
                     reminder_3d = task.get('reminder_3d', False)
                     
                     logger.info(f"📋 Задача #{task_id}: '{task_text}'")
-                    logger.info(f"   📅 Дедлайн: {deadline.strftime('%d.%m.%Y %H:%M')}")
+                    logger.info(f"   📅 Дедлайн (локальный): {deadline.strftime('%d.%m.%Y %H:%M')}")
                     logger.info(f"   ⏳ Осталось: {days_left}д {hours_left}ч {minutes_left}м")
                     logger.info(f"   🔄 Повторение: {task.get('recurring_type', 'нет')}")
                     logger.info(f"   🏷️ Статусы: 5м:{reminder_5m} 1ч:{reminder_1h} 24ч:{reminder_24h} 3д:{reminder_3d}")
+
+                    # Проверяем, не прошёл ли уже дедлайн
+                    if time_left.total_seconds() <= 0:
+                        logger.info(f"   ⚠️ Задача просрочена на {abs(minutes_left)} минут")
+                        continue
 
                     # Проверяем напоминание за 5 минут
                     if not reminder_5m and 0 < minutes_left <= 5:
@@ -126,23 +159,34 @@ class ReminderScheduler:
 
                 except Exception as e:
                     logger.error(f"❌ Ошибка при обработке задачи {task.get('id', 'unknown')}: {e}")
+                    logger.error(traceback.format_exc())
                     continue
 
             logger.info(f"✅ ПРОВЕРКА #{self.check_count} ЗАВЕРШЕНА")
-            logger.info("="*60)
+            logger.info("="*70)
 
         except Exception as e:
             logger.error(f"❌ КРИТИЧЕСКАЯ ОШИБКА: {e}")
+            logger.error(traceback.format_exc())
 
     async def _send_reminder(self, task, time_text):
         """Отправка напоминания"""
         try:
-            deadline = self._make_aware(datetime.strptime(task['deadline'], '%Y-%m-%d %H:%M:%S'))
+            # Парсим дедлайн из БД
+            deadline_naive = datetime.strptime(task['deadline'], '%Y-%m-%d %H:%M:%S')
+            deadline_utc = pytz.UTC.localize(deadline_naive)
+            deadline = deadline_utc.astimezone(self.timezone)
             
             # Добавляем информацию о повторении
             recurring_text = ""
             if task.get('recurring_type'):
-                recurring_text = f"\n🔄 Повторяется: кажд{'' if task['recurring_interval']==1 else 'ые'} {task['recurring_interval']} {task['recurring_type']}"
+                rt_map = {'day': 'день', 'week': 'неделю', 'month': 'месяц', 'year': 'год'}
+                rt_ru = rt_map.get(task['recurring_type'], task['recurring_type'])
+                ri = task.get('recurring_interval', 1)
+                if ri == 1:
+                    recurring_text = f"\n🔄 Повторяется: каждый {rt_ru}"
+                else:
+                    recurring_text = f"\n🔄 Повторяется: каждые {ri} {rt_ru}а"
             
             message = (
                 f"⏰ **НАПОМИНАНИЕ!**\n\n"
@@ -162,6 +206,7 @@ class ReminderScheduler:
 
         except Exception as e:
             logger.error(f"❌ Ошибка отправки напоминания: {e}")
+            logger.error(traceback.format_exc())
 
     def stop(self):
         """Остановка планировщика"""
