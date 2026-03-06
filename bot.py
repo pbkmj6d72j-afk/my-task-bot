@@ -142,7 +142,6 @@ def get_task_actions_keyboard(task_id, has_subtasks=False):
     """Клавиатура действий с задачей"""
     buttons = []
     
-    # Основные действия
     if has_subtasks:
         buttons.append([InlineKeyboardButton(text="📋 Подзадачи", callback_data=f"subtasks:{task_id}")])
     
@@ -203,7 +202,10 @@ def get_month_calendar_keyboard(year, month):
     
     # Дни недели
     week_days = ['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс']
-    buttons.append([InlineKeyboardButton(text=day, callback_data="noop") for day in week_days])
+    week_row = []
+    for day in week_days:
+        week_row.append(InlineKeyboardButton(text=day, callback_data="noop"))
+    buttons.append(week_row)
     
     # Дни месяца
     first_day, days_in_month = monthrange(year, month)
@@ -339,7 +341,8 @@ async def process_priority(callback: types.CallbackQuery, state: FSMContext):
         reply_markup=get_recurring_keyboard()
     )
     await callback.answer()
-    @dp.callback_query(TaskStates.waiting_for_recurring, F.data.startswith("recurring:"))
+
+@dp.callback_query(TaskStates.waiting_for_recurring, F.data.startswith("recurring:"))
 async def process_recurring(callback: types.CallbackQuery, state: FSMContext):
     """Обработка выбора типа повторения"""
     recurring_type = callback.data.split(":")[1]
@@ -392,6 +395,8 @@ async def process_deadline_date(callback: types.CallbackQuery, state: FSMContext
         await callback.message.answer("🕐 Введите время (ЧЧ:ММ):")
     elif choice == "custom":
         await callback.message.answer("Введите дату в формате ДД.ММ.ГГГГ:")
+    else:
+        await callback.message.answer("🕐 Введите время (ЧЧ:ММ):")
     
     await callback.answer()
 
@@ -946,13 +951,10 @@ async def toggle_subtask(callback: types.CallbackQuery):
     """Отметить/снять подзадачу"""
     subtask_id = int(callback.data.split(":")[1])
     
-    # Получаем информацию о подзадаче (в реальном коде нужно получить task_id)
-    # Здесь упрощённо - предполагаем, что нужно отметить как выполненную
+    # В реальном коде здесь нужно получить task_id
     db.complete_subtask(subtask_id)
     
     await callback.answer("✅ Статус подзадачи изменён")
-    # Обновляем отображение (нужно получить task_id)
-    await callback.message.edit_text("✅ Обновлено")
 
 # --- Обработчики дополнительных напоминаний ---
 @dp.callback_query(F.data.startswith("add_reminder:"))
@@ -1004,7 +1006,6 @@ async def process_reminder_text(message: types.Message, state: FSMContext):
     db.add_reminder(task_id, reminder_time, reminder_text)
     await state.clear()
     
-    task = db.get_task(task_id)
     await message.answer(
         f"✅ Дополнительное напоминание добавлено!\n"
         f"📅 Время: {reminder_time.strftime('%d.%m.%Y %H:%M')}",
